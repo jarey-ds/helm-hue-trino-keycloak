@@ -10,6 +10,11 @@ trino:
   server:
     workers: 3
   
+  # Additional configuration properties
+  # Enable processing of X-Forwarded-For headers for ingress/proxy support
+  additionalConfigProperties:
+    - http-server.process-forwarded=true
+  
   # Coordinator JVM settings
   coordinator:
     jvm:
@@ -24,6 +29,22 @@ trino:
   service:
     type: ClusterIP
     port: 8080
+  
+  # Ingress configuration
+  ingress:
+    enabled: true
+    className: "nginx"  # Ingress class name (e.g., nginx, traefik)
+    annotations: {}
+    hosts:
+      - host: "trino.local"
+        paths:
+          - path: /
+            pathType: ImplementationSpecific
+    # TLS configuration (optional)
+    # tls:
+    #   - secretName: trino-tls
+    #     hosts:
+    #       - trino.local
 
 # Apache Hue Configuration
 hue:
@@ -67,7 +88,7 @@ hue:
     # The service name will be automatically constructed in the interpreters template
     serviceName: ""  # If empty, will use <release-name>-trino
     port: 8080
-    auth_username: ""  # Set if using LDAP authentication
+    auth_username: "admin"  # Default username for Trino authentication
     auth_password: ""  # Set if using LDAP authentication or password script
   
   # Interpreters configuration for Hue
