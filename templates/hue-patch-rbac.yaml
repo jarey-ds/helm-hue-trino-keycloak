@@ -1,0 +1,76 @@
+{{- if and .Values.hue.enabled .Values.trino.enabled }}
+{{- /*
+RBAC resources must be created as pre-install hooks to be available for other hooks.
+These are created before the cleanup and patch hooks.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-hue-patch
+  labels:
+    app: {{ .Release.Name }}-hue
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-hue-patch
+  labels:
+    app: {{ .Release.Name }}-hue
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-9"
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["hue-config", "{{ .Release.Name }}-hue-patch-script"]
+  verbs: ["get", "patch", "update"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  resourceNames: ["postgres-pvc"]
+  verbs: ["get", "delete", "list", "update", "watch"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["create", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceNames: ["hue", "postgres-hue"]
+  verbs: ["get", "patch", "list", "update"]
+- apiGroups: ["apps"]
+  resources: ["deployments/scale"]
+  resourceNames: ["hue", "postgres-hue"]
+  verbs: ["get", "patch", "update"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-hue-patch
+  labels:
+    app: {{ .Release.Name }}-hue
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-8"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-hue-patch
+subjects:
+- kind: ServiceAccount
+  name: {{ .Release.Name }}-hue-patch
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+

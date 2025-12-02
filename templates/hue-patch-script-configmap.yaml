@@ -1,0 +1,103 @@
+{{- if and .Values.hue.enabled .Values.trino.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-hue-patch-script
+  labels:
+    app: {{ .Release.Name }}-hue
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+data:
+  patch_hue.py: |
+    import json
+    import re
+    import os
+
+    with open("/tmp/hue-config.json", "r") as f:
+        config = json.load(f)
+
+    hue_ini = config["data"]["hue-ini"]
+
+    # Configure CSRF trusted origins for ingress
+    # Use trusted_origins in [[session]] section which is a child of [desktop]
+    trusted_origins = os.environ.get("TRUSTED_ORIGINS", "http://hue.local,https://hue.local")
+    trusted_origins_config = f"trusted_origins={trusted_origins}"
+    
+    # Find [desktop] section and add [[session]] as a child section
+    # Pattern: [desktop] ... content ... [[next_section]] or end of file
+    desktop_pattern = r"(\[desktop\])(.*?)(?=\n\[[^[]|\Z)"
+    desktop_match = re.search(desktop_pattern, hue_ini, re.DOTALL)
+    
+    if desktop_match:
+        desktop_section = desktop_match.group(0)
+        desktop_start = desktop_match.start()
+        desktop_end = desktop_match.end()
+        
+        # Check if [[session]] already exists within [desktop] section
+        if "[[session]]" in desktop_section:
+            # [[session]] exists, update trusted_origins within it
+            session_pattern = r"(\[\[session\]\])(.*?)(?=\[\[|\n\[[^[]|\Z)"
+            session_match = re.search(session_pattern, desktop_section, re.DOTALL)
+            if session_match:
+                session_content = session_match.group(2)
+                if "trusted_origins" in session_content:
+                    # Update existing trusted_origins
+                    desktop_section = re.sub(r"trusted_origins=.*", trusted_origins_config, desktop_section)
+                    print("Updated trusted_origins in existing [[session]] section")
+                else:
+                    # Add trusted_origins to existing [[session]] section
+                    desktop_section = re.sub(r"(\[\[session\]\])", r"\1\n" + trusted_origins_config, desktop_section)
+                    print("Added trusted_origins to existing [[session]] section")
+            else:
+                # [[session]] exists but pattern didn't match, add trusted_origins after it
+                desktop_section = re.sub(r"(\[\[session\]\])", r"\1\n" + trusted_origins_config, desktop_section)
+                print("Added trusted_origins to [[session]] section")
+        else:
+            # [[session]] doesn't exist, add it as a child of [desktop]
+            # Find the end of [desktop] section (before next top-level section)
+            # Add [[session]] before the next [section] or at the end
+            desktop_section = desktop_section.rstrip() + "\n[[session]]\n" + trusted_origins_config + "\n"
+            print("Added [[session]] section as child of [desktop]")
+        
+        # Replace the [desktop] section in the full config
+        hue_ini = hue_ini[:desktop_start] + desktop_section + hue_ini[desktop_end:]
+    else:
+        # [desktop] section doesn't exist, add it with [[session]] child
+        hue_ini = "[desktop]\n[[session]]\n" + trusted_origins_config + "\n\n" + hue_ini
+        print("Added [desktop] section with [[session]] child")
+
+    trino_service = os.environ["TRINO_SERVICE"]
+    trino_port = os.environ["TRINO_PORT"]
+    trino_auth_user = os.environ["TRINO_AUTH_USER"]
+    trino_auth_pass = os.environ["TRINO_AUTH_PASS"]
+
+    # Generate Trino interpreter block
+    trino_interpreter = """    [[[trino]]]
+    name=Trino
+    interface=trino
+    options='{"url": "http://""" + trino_service + """:""" + trino_port + """", "auth_username": \"""" + trino_auth_user + """\", "auth_password": \"""" + trino_auth_pass + """\"}'
+    """
+
+    # Check if Trino interpreter already exists
+    if "[[[trino]]]" in hue_ini:
+        print("Trino interpreter exists, updating...")
+        pattern = r"(\s+)\[\[\[trino\]\]\].*?(?=\n\s*(\[\[|$))"
+        hue_ini = re.sub(pattern, "", hue_ini, flags=re.DOTALL)
+        hue_ini = re.sub(r"(\[\[interpreters\]\])", r"\1\n" + trino_interpreter, hue_ini)
+    else:
+        print("Adding Trino interpreter...")
+        hue_ini = re.sub(r"(\[\[interpreters\]\])", r"\1\n" + trino_interpreter, hue_ini)
+
+    
+
+    # Update the config
+    config["data"]["hue-ini"] = hue_ini
+
+    # Write back
+    with open("/tmp/hue-config-updated.json", "w") as f:
+        json.dump(config, f)
+
+    print("ConfigMap updated successfully")
+{{- end }}
+

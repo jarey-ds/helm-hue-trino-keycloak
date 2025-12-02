@@ -1,0 +1,9 @@
+dependencies:
+- name: trino
+  repository: https://trinodb.github.io/charts/
+  version: 1.41.0
+- name: hue
+  repository: https://helm.gethue.com
+  version: 1.0.3
+digest: sha256:7872661ee5c94955cb8ad4fd180e0ec674828e474f90c33a0989d697da4b768f
+generated: "2025-12-02T09:10:20.650180573+01:00"

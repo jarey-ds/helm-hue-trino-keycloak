@@ -1,0 +1,59 @@
+{{- if and .Values.hue.enabled .Values.trino.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-patch-hue-configmap-{{ .Release.Revision }}
+  labels:
+    app: {{ .Release.Name }}-hue
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: {{ .Release.Name }}-patch-hue-configmap
+    spec:
+      serviceAccountName: {{ .Release.Name }}-hue-patch
+      restartPolicy: OnFailure
+      containers:
+      - name: patch-configmap
+        image: python:3.11-slim
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "Installing kubectl..."
+          apt-get update && apt-get install -y curl jq && \
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
+          chmod +x kubectl && mv kubectl /usr/local/bin/
+          
+          echo "Patching Hue ConfigMap with Trino interpreter configuration..."
+          
+          export TRINO_SERVICE="{{ include "trino-hue.trinoServiceName" . }}"
+          export TRINO_PORT="{{ .Values.hue.trino.port }}"
+          export TRINO_AUTH_USER="{{ .Values.hue.trino.auth_username }}"
+          export TRINO_AUTH_PASS="{{ .Values.hue.trino.auth_password }}"
+          export TRUSTED_ORIGINS="{{ .Values.hue.ingress.domain }}"
+          
+          # Get the current ConfigMap
+          kubectl get configmap hue-config -n {{ .Release.Namespace }} -o json > /tmp/hue-config.json || exit 1
+          
+          # Copy Python script from ConfigMap
+          kubectl get configmap {{ .Release.Name }}-hue-patch-script -n {{ .Release.Namespace }} -o jsonpath='{.data.patch_hue\.py}' > /tmp/patch_hue.py
+          
+          # Run the Python script
+          python3 /tmp/patch_hue.py
+          
+          # Apply the updated ConfigMap
+          kubectl apply -f /tmp/hue-config-updated.json -n {{ .Release.Namespace }}
+          
+          echo "Hue ConfigMap patched successfully with Trino service: ${TRINO_SERVICE}:${TRINO_PORT}"
+          echo "Restarting Hue deployment to pick up new configuration..."
+          kubectl rollout restart deployment/hue -n {{ .Release.Namespace }} || echo "Warning: Could not restart deployment (may not exist yet)"
+{{- end }}
+

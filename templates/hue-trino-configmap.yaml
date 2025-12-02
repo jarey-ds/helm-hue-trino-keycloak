@@ -1,0 +1,20 @@
+{{- if and .Values.hue.enabled .Values.trino.enabled }}
+{{- /*
+This ConfigMap provides the Trino interpreter configuration for Hue.
+The Hue chart uses hue.interpreters in its own ConfigMap, so this serves as a reference
+or can be used with extraVolumes/extraVolumeMounts if the Hue chart supports it.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-hue-trino-interpreter
+  labels:
+    app: {{ .Release.Name }}-hue
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+data:
+  trino-interpreter.conf: |
+    {{- include "trino-hue.trinoInterpreter" . | nindent 4 }}
+{{- end }}
+

@@ -1,0 +1,147 @@
+{{- if and .Values.hue.enabled .Values.hue.database.create }}
+{{- /*
+Pre-install hook: Delete PVC if it exists to prevent data format incompatibility.
+The default Hue chart uses postgres:9.5 which initializes data in an incompatible format.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-cleanup-postgres-pvc-{{ .Release.Revision }}
+  labels:
+    app: {{ .Release.Name }}-hue
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: {{ .Release.Name }}-cleanup-postgres-pvc
+    spec:
+      serviceAccountName: {{ .Release.Name }}-hue-patch
+      restartPolicy: OnFailure
+      containers:
+      - name: cleanup-pvc
+        image: bitnami/kubectl:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "Checking for existing PostgreSQL PVC..."
+          
+          # Check if PVC exists and delete it if the flag is set
+          if kubectl get pvc postgres-pvc -n {{ .Release.Namespace }} &>/dev/null; then
+            if {{ .Values.hue.database.deleteExistingPVC | default false }}; then
+              echo "Deleting existing PostgreSQL PVC to prevent data format incompatibility..."
+              kubectl delete pvc postgres-pvc -n {{ .Release.Namespace }} --wait=true || echo "Warning: Could not delete PVC"
+              echo "PVC deleted successfully"
+            else
+              echo "WARNING: Existing PVC found but deleteExistingPVC is false."
+              echo "The PVC may contain PostgreSQL 9.5 data which is incompatible with PostgreSQL 12+."
+              echo "Set hue.database.deleteExistingPVC: true to delete it automatically."
+            fi
+          else
+            echo "No existing PVC found, proceeding with fresh installation"
+          fi
+---
+{{- /*
+Post-install hook: Patch the PostgreSQL deployment to use PostgreSQL 12+ and ensure fresh start.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-patch-postgres-{{ .Release.Revision }}
+  labels:
+    app: {{ .Release.Name }}-hue
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: {{ .Release.Name }}-patch-postgres
+    spec:
+      serviceAccountName: {{ .Release.Name }}-hue-patch
+      restartPolicy: OnFailure
+      containers:
+      - name: patch-postgres
+        image: bitnami/kubectl:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "Patching PostgreSQL deployment to use PostgreSQL 12+..."
+          
+          POSTGRES_IMAGE="{{ .Values.hue.database.image | default "postgres:15" }}"
+          
+          # Wait for the postgres-hue deployment to exist
+          echo "Waiting for postgres-hue deployment to be created..."
+          for i in $(seq 1 30); do
+            if kubectl get deployment postgres-hue -n {{ .Release.Namespace }} &>/dev/null; then
+              echo "Found postgres-hue deployment"
+              break
+            fi
+            echo "Waiting for postgres-hue deployment... ($i/30)"
+            sleep 2
+          done
+          
+          # Scale down to 0 to stop any running pods with old image
+          echo "Scaling down deployment to stop any pods with old PostgreSQL version..."
+          kubectl scale deployment postgres-hue -n {{ .Release.Namespace }} --replicas=0 --timeout=60s || true
+          
+          # Wait for pods to terminate
+          echo "Waiting for pods to terminate..."
+          sleep 5
+          
+          # Delete PVC if it exists and deleteExistingPVC is true
+          # This ensures PostgreSQL 15 starts with a fresh data directory
+          if kubectl get pvc postgres-pvc -n {{ .Release.Namespace }} &>/dev/null; then
+            if {{ .Values.hue.database.deleteExistingPVC | default false }}; then
+              echo "Deleting existing PostgreSQL PVC to ensure fresh data directory for PostgreSQL 15..."
+              kubectl delete pvc postgres-pvc -n {{ .Release.Namespace }} --wait=true || echo "Warning: Could not delete PVC"
+              echo "PVC deleted successfully"
+            else
+              echo "WARNING: PVC exists with potentially incompatible PostgreSQL 9.5 data."
+              echo "The deployment may fail to start. Set hue.database.deleteExistingPVC: true to delete it."
+            fi
+          fi
+          
+          # Patch the deployment to use the correct PostgreSQL image
+          echo "Patching deployment with image: ${POSTGRES_IMAGE}"
+          kubectl patch deployment postgres-hue -n {{ .Release.Namespace }} --type json -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": "'"${POSTGRES_IMAGE}"'"}]'
+          
+          # Ensure PVC exists before scaling up (create if it doesn't exist)
+          if ! kubectl get pvc postgres-pvc -n {{ .Release.Namespace }} &>/dev/null; then
+            echo "Creating PostgreSQL PVC..."
+            STORAGE_CLASS="{{ .Values.hue.database.storageName | default "standard" }}"
+            # Create PVC using printf to generate YAML
+            printf 'apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: postgres-pvc\n  namespace: {{ .Release.Namespace }}\nspec:\n  storageClassName: %s\n  accessModes:\n    - ReadWriteOnce\n  resources:\n    requests:\n      storage: 2Gi\n' "${STORAGE_CLASS}" | kubectl apply -f -
+            echo "Waiting for PVC to be created and bound..."
+            kubectl wait --for=condition=Bound pvc/postgres-pvc -n {{ .Release.Namespace }} --timeout=60s || echo "Warning: PVC may still be provisioning"
+          else
+            echo "PVC already exists, proceeding..."
+          fi
+          
+          # Delete any remaining pods to ensure they're recreated with new image
+          echo "Deleting any remaining pods to ensure fresh start..."
+          kubectl delete pod -l app=postgres-hue -n {{ .Release.Namespace }} --ignore-not-found=true || true
+          sleep 2
+          
+          # Scale back up to 1
+          echo "Scaling deployment back up with new PostgreSQL image..."
+          kubectl scale deployment postgres-hue -n {{ .Release.Namespace }} --replicas=1 --timeout=60s
+          
+          echo "PostgreSQL deployment patched successfully with image: ${POSTGRES_IMAGE}"
+          echo "Waiting for new pod to be ready..."
+          kubectl wait --for=condition=ready pod -l app=postgres-hue -n {{ .Release.Namespace }} --timeout=120s || echo "Warning: Pod may still be starting"
+{{- end }}
+

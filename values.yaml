@@ -1,0 +1,119 @@
+# Trino Configuration
+trino:
+  enabled: true
+  
+  # Image configuration
+  image:
+    tag: "478"
+  
+  # Server configuration
+  server:
+    workers: 3
+  
+  # Coordinator JVM settings
+  coordinator:
+    jvm:
+      maxHeapSize: "8G"
+  
+  # Worker JVM settings
+  worker:
+    jvm:
+      maxHeapSize: "8G"
+  
+  # Service configuration for Hue integration
+  service:
+    type: ClusterIP
+    port: 8080
+
+# Apache Hue Configuration
+hue:
+  enabled: true
+  
+  # Database configuration
+  # Note: Hue requires PostgreSQL 12 or later
+  database:
+    # Set to false to use an existing PostgreSQL database in the cluster
+    # When false, ensure the database specified below exists and is accessible
+    create: true
+    
+    # Only used when create: true
+    persist: true
+    # Storage class for PostgreSQL PVC (default: "standard" for Minikube)
+    # Only used when create: true and persist: true
+    storageName: "standard"
+    # Delete existing PVC if it exists (default: true)
+    # Set to true to automatically delete PVC with incompatible PostgreSQL 9.5 data
+    # WARNING: This will delete all existing data!
+    # Set to false to preserve data (requires manual migration)
+    deleteExistingPVC: true
+    # PostgreSQL image - must be 12 or later (default: postgres:15)
+    # Only used when create: true
+    image: "postgres:15"
+    
+    # Database connection settings (used for both created and existing databases)
+    engine: "postgresql_psycopg2"
+    host: "postgres-hue"  # For existing database, use the service name or FQDN
+    port: 5432
+    user: "hue"  # For existing database, use your database username
+    password: "hue"  # For existing database, use your database password
+    # password_script: "echo ${DATABASE_PASSWORD}"  # Alternative: use password script
+    name: "hue"  # Database name
+  
+  # Trino connection settings for Hue integration
+  # Based on: https://gethue.com/blog/2024-06-26-integrating-trino-editor-in-hue-supporting-data-mesh-and-sql-federation/
+  trino:
+    # Trino service URL - defaults to <release-name>-trino:8080
+    # Override this if your Trino service has a different name
+    # The service name will be automatically constructed in the interpreters template
+    serviceName: ""  # If empty, will use <release-name>-trino
+    port: 8080
+    auth_username: ""  # Set if using LDAP authentication
+    auth_password: ""  # Set if using LDAP authentication or password script
+  
+  # Interpreters configuration for Hue
+  # NOTE: The Trino interpreter will be automatically added via a post-install hook
+  # You can add additional interpreters here if needed
+  # The Trino interpreter configuration is handled automatically based on:
+  # - hue.trino.serviceName (defaults to <release-name>-trino)
+  # - hue.trino.port (defaults to 8080)
+  # - hue.trino.auth_username and auth_password
+  interpreters: |
+    # Trino interpreter will be added automatically
+    # Add other interpreters here if needed
+  
+  # Additional hue.ini configuration
+  # Add any other Hue configuration here
+  # Note: CSRF trusted_origins are automatically configured in [[session]] section via post-install hook
+  ini: |
+    # Additional Hue configuration can be added here
+    [desktop]
+    [[session]]
+    trusted_origins=hue.local
+  # Ingress configuration
+  ingress:
+    create: true
+    domain: "hue.local"
+    hasAuth: false
+    type: "nginx"
+    # type: "nginx-ssl"
+    # type: "nginx-ssl-staging"
+    # type: "traefik"
+    # extraHosts:
+    #   - "hue.example.com"
+    annotations:
+      # Proxy headers for CSRF protection and proper request handling
+      nginx.ingress.kubernetes.io/proxy-body-size: "0"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+      nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+      # Proxy headers are automatically set by nginx ingress controller
+      # No need for configuration-snippet when snippets are disabled
+    # email: "admin@example.com"
+    # loadBalancerIp: ""
+
+# Global settings
+global:
+  # Namespace - set this if deploying to a specific namespace
+  namespace: default
+
