@@ -38,7 +38,30 @@ spec:
           export TRINO_PORT="{{ .Values.hue.trino.port }}"
           export TRINO_AUTH_USER="{{ .Values.hue.trino.auth_username }}"
           export TRINO_AUTH_PASS="{{ .Values.hue.trino.auth_password }}"
+          {{- if .Values.hue.oidc.enabled }}
           export TRUSTED_ORIGINS="{{ .Values.hue.ingress.domain }}"
+          export OIDC_ENABLED="true"
+          export OIDC_KEYCLOAK_SERVICE="{{ .Values.hue.oidc.keycloak.serviceName }}"
+          export OIDC_KEYCLOAK_NAMESPACE="{{ .Values.hue.oidc.keycloak.namespace | default .Release.Namespace }}"
+          export OIDC_KEYCLOAK_REALM="{{ .Values.hue.oidc.keycloak.realm }}"
+          export OIDC_KEYCLOAK_INGRESS_DOMAIN="{{ .Values.hue.oidc.keycloak.ingressDomain }}"
+          export OIDC_CLIENT_ID="{{ .Values.hue.oidc.clientId }}"
+          export OIDC_CLIENT_SECRET="{{ .Values.hue.oidc.clientSecret }}"
+          export OIDC_CREATE_USERS="{{ .Values.hue.oidc.createUsersOnLogin }}"
+          export OIDC_SUPERUSER_GROUP="{{ .Values.hue.oidc.superuserGroup }}"
+          export OIDC_USERNAME_ATTRIBUTE="{{ .Values.hue.oidc.usernameAttribute }}"
+          export OIDC_LOGIN_REDIRECT_URL="{{ .Values.hue.oidc.loginRedirectUrl }}"
+          export OIDC_LOGIN_REDIRECT_URL_FAILURE="{{ .Values.hue.oidc.loginRedirectUrlFailure }}"
+          export OIDC_ALLOW_HTTP_REDIRECT="{{ .Values.hue.oidc.allowHttpRedirectUri | default false }}"
+          export OIDC_DISABLE_SSL_VERIFICATION="{{ .Values.hue.oidc.disableSslVerification | default false }}"
+          export INGRESS_FORCE_SSL="{{ index .Values.hue.ingress.annotations "nginx.ingress.kubernetes.io/force-ssl-redirect" | default "false" }}"
+          export HUE_INGRESS_DOMAIN="{{ .Values.hue.ingress.domain }}"
+          {{- else }}
+          export OIDC_ENABLED="false"
+          {{- end }}
+          export BEHIND_REVERSE_PROXY="{{ .Values.hue.behindReverseProxy | default true }}"
+          export REVERSE_PROXY_HEADER="{{ .Values.hue.reverseProxyHeader | default "HTTP_X_FORWARDED_FOR" }}"
+          export AUTH_BACKENDS="{{ join "," .Values.hue.authBackends }}"
           
           # Get the current ConfigMap
           kubectl get configmap hue-config -n {{ .Release.Namespace }} -o json > /tmp/hue-config.json || exit 1

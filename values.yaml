@@ -50,6 +50,14 @@ trino:
 hue:
   enabled: true
   
+  # Image configuration for custom Hue image with OIDC support
+  # Build your custom image with the same name/tag as the original (e.g., gethue/hue:latest)
+  # and set pullPolicy to "Never" to use your local image
+  image:
+    registry: "gethue"  # Keep same registry/name as original
+    tag: "latest"  # Keep same tag as original
+    pullPolicy: "IfNotPresent"  # Set to "Never" to use local/custom image
+  
   # Database configuration
   # Note: Hue requires PostgreSQL 12 or later
   database:
@@ -102,9 +110,70 @@ hue:
     # Trino interpreter will be added automatically
     # Add other interpreters here if needed
   
+  # OIDC Authentication configuration (Keycloak)
+  oidc:
+    enabled: true  # Set to true to enable OIDC authentication
+    # Keycloak configuration
+    keycloak:
+      # Keycloak service name (default: keycloak)
+      serviceName: "keycloak"
+      # Keycloak namespace (default: same as release namespace)
+      namespace: ""  # Empty means same namespace as release
+      # Keycloak realm name
+      realm: "master"  # Change to your Keycloak realm
+      # Keycloak ingress domain (if accessible via ingress)
+      # If empty, will use service FQDN: <serviceName>.<namespace>.svc.cluster.local
+      ingressDomain: "keycloak.local"
+    # OIDC client configuration
+    clientId: "trino-hue"
+    clientSecret: "HGy9WGTCCGHSgElP0jUXrDTZPp8YwYw7"
+    # OIDC settings
+    createUsersOnLogin: true  # Create users automatically on first login
+    superuserGroup: "hue_superuser"  # Group name for superusers
+    usernameAttribute: "preferred_username"  # Attribute to use as username
+    # Redirect URLs (will be auto-configured based on ingress domain if not specified)
+    # For development without TLS, use HTTP. For production, use HTTPS.
+    # If empty, will auto-configure based on hue.ingress.domain and ingress SSL redirect settings
+    loginRedirectUrl: ""  # Auto-configured: https://<hue.ingress.domain>/oidc/callback/ (or http:// if allowHttpRedirectUri is true and no SSL redirect)
+    loginRedirectUrlFailure: ""  # Auto-configured: https://<hue.ingress.domain>/hue/oidc_failed/ (or http:// if allowHttpRedirectUri is true and no SSL redirect)
+    # Allow HTTP redirect URIs for development (set to true if using HTTP ingress without TLS)
+    # Note: If ingress has force-ssl-redirect enabled, HTTPS will be used regardless of this setting
+    allowHttpRedirectUri: false  # Set to true only if ingress does NOT force SSL redirects
+    # Disable SSL verification for OIDC requests (set to true for self-signed certificates)
+    disableSslVerification: true  # Set to false in production with valid certificates
+  
+  # Logging configuration
+  # Enable verbose/debug logging for troubleshooting
+  # Set to true to enable DEBUG level logging (very verbose)
+  enableDebugLogging: true  # Set to false in production
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  # If enableDebugLogging is true, this is automatically set to DEBUG
+  logLevel: "DEBUG"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  
+  # Remote debugging configuration
+  # Enable remote debugging with debugpy (VS Code compatible)
+  enableRemoteDebug: true  # Set to true to enable remote debugging
+  remoteDebug:
+    port: 5678  # Port for debugpy to listen on
+    waitForAttach: false  # If true, Hue will wait for debugger to attach before starting
+  
+  # Reverse proxy configuration
+  # Configure Hue to work behind a reverse proxy (e.g., ingress controller)
+  behindReverseProxy: true  # Set to true when Hue is behind a reverse proxy
+  reverseProxyHeader: "HTTP_X_FORWARDED_FOR"  # Header to use for reverse proxy IP detection
+  
+  # Authentication backends
+  # Comma-separated list of authentication backends to use
+  # Default includes AllowFirstUserDjangoBackend (for first user creation) and OIDCBackend (for OIDC)
+  authBackends:
+    - "desktop.auth.backend.AllowFirstUserDjangoBackend"
+    #- "desktop.auth.backend.OIDCBackend"
+  
   # Additional hue.ini configuration
   # Add any other Hue configuration here
   # Note: CSRF trusted_origins are automatically configured in [[session]] section via post-install hook
+  # Note: OIDC configuration is automatically added via post-install hook if hue.oidc.enabled is true
+  # Note: Reverse proxy and auth backend settings are automatically configured via post-install hook
   ini: |
     # Additional Hue configuration can be added here
     [desktop]
@@ -127,7 +196,8 @@ hue:
       nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
       nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
       nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"  # Force HTTPS redirects
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"  # Redirect HTTP to HTTPS
       # Proxy headers are automatically set by nginx ingress controller
       # No need for configuration-snippet when snippets are disabled
     # email: "admin@example.com"

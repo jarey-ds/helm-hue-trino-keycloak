@@ -63,3 +63,4 @@ Generate complete interpreters configuration for Hue
 {{- end }}
 
 
+

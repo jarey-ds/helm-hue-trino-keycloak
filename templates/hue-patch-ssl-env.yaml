@@ -1,0 +1,77 @@
+{{- if and .Values.hue.enabled .Values.hue.oidc.enabled .Values.hue.oidc.disableSslVerification }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-patch-hue-ssl-env-{{ .Release.Revision }}
+  labels:
+    app: {{ .Release.Name }}-hue
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: {{ .Release.Name }}-patch-hue-ssl-env
+    spec:
+      serviceAccountName: {{ .Release.Name }}-hue-patch
+      restartPolicy: OnFailure
+      containers:
+      - name: patch-ssl-env
+        image: bitnami/kubectl:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "Adding SSL verification disable environment variables to Hue deployment..."
+          
+          # Wait for the hue deployment to exist
+          echo "Waiting for hue deployment to be created..."
+          for i in $(seq 1 30); do
+            if kubectl get deployment hue -n {{ .Release.Namespace }} &>/dev/null; then
+              echo "Found hue deployment"
+              break
+            fi
+            echo "Waiting for hue deployment... ($i/30)"
+            sleep 2
+          done
+          
+          # Install jq if not available
+          if ! command -v jq &> /dev/null; then
+            echo "Installing jq..."
+            apk add --no-cache jq || apt-get update && apt-get install -y jq || yum install -y jq
+          fi
+          
+          # Get the current deployment
+          kubectl get deployment hue -n {{ .Release.Namespace }} -o json > /tmp/hue-deployment.json
+          
+          # Check if PYTHONHTTPSVERIFY is already set
+          CURRENT_ENV=$(kubectl get deployment hue -n {{ .Release.Namespace }} -o jsonpath='{.spec.template.spec.containers[?(@.name=="hue")].env[*].name}' 2>/dev/null || echo "")
+          
+          if echo "$CURRENT_ENV" | grep -q "PYTHONHTTPSVERIFY"; then
+            echo "PYTHONHTTPSVERIFY already configured"
+          else
+            echo "Adding SSL verification disable environment variables..."
+            
+            # Add environment variables to disable SSL verification
+            # PYTHONHTTPSVERIFY=0 disables SSL verification for Python requests
+            # PYTHONDONTWRITEBYTECODE=1 is optional, just to keep things clean
+            cat /tmp/hue-deployment.json | jq '.spec.template.spec.containers[] |= if .name == "hue" then .env += [{"name": "PYTHONHTTPSVERIFY", "value": "0"}, {"name": "PYTHONWARNINGS", "value": "ignore:Unverified HTTPS request"}] else . end' > /tmp/hue-deployment-updated.json
+            
+            kubectl apply -f /tmp/hue-deployment-updated.json -n {{ .Release.Namespace }}
+            
+            echo "SSL verification environment variables added"
+          fi
+          
+          echo "Restarting Hue deployment to apply changes..."
+          kubectl rollout restart deployment/hue -n {{ .Release.Namespace }} || echo "Warning: Could not restart deployment"
+          
+          echo "Waiting for deployment to be ready..."
+          kubectl rollout status deployment/hue -n {{ .Release.Namespace }} --timeout=120s || echo "Warning: Deployment may still be rolling out"
+{{- end }}
+
+

@@ -69,11 +69,24 @@ trino:
   worker:
     jvm:
       maxHeapSize: "8G"
+  # Enable processing of X-Forwarded-For headers for ingress/proxy support
+  additionalConfigProperties:
+    - http-server.process-forwarded=true
+  ingress:
+    enabled: true
+    className: "nginx"
+    hosts:
+      - host: "trino.local"
+        paths:
+          - path: /
+            pathType: ImplementationSpecific
 ```
 
 ### Apache Hue Configuration
 
 Hue is automatically configured to connect to Trino through a post-install hook that patches the Hue ConfigMap. The configuration follows the [official Hue Trino integration guide](https://gethue.com/blog/2024-06-26-integrating-trino-editor-in-hue-supporting-data-mesh-and-sql-federation/).
+
+**Image Configuration**: To use a custom Hue image (e.g., with OIDC support), build it with the same name/tag as the original (e.g., `gethue/hue:latest`) and set `pullPolicy: "Never"` to use your local image.
 
 **PostgreSQL Version**: The Hue chart defaults to PostgreSQL 9.5, but Hue requires PostgreSQL 12 or later. When `hue.database.create: true`, this chart automatically patches the PostgreSQL deployment to use PostgreSQL 15 (configurable via `hue.database.image`).
 
@@ -96,6 +109,14 @@ Example configuration for creating a PostgreSQL database:
 ```yaml
 hue:
   enabled: true
+  
+  # Image configuration for custom Hue image with OIDC support
+  # Build your custom image with the same name/tag (e.g., gethue/hue:latest)
+  # and set pullPolicy to "Never" to use your local image
+  image:
+    registry: "gethue"  # Keep same registry/name as original
+    tag: "latest"  # Keep same tag as original
+    pullPolicy: "Never"  # Use "Never" for local/custom images
   
   # Database configuration - creating a new PostgreSQL instance
   database:
@@ -173,6 +194,12 @@ hue:
 
 Access Trino coordinator:
 
+**Via Ingress** (if enabled):
+- Default domain: `http://trino.local`
+- Ensure your `/etc/hosts` includes: `127.0.0.1 trino.local` (or configure DNS)
+- Or use the configured domain from `trino.ingress.hosts[0].host`
+
+**Via Port Forward**:
 ```bash
 kubectl port-forward svc/<release-name>-trino-coordinator 8080:8080 -n <namespace>
 ```
@@ -195,16 +222,125 @@ kubectl port-forward svc/<release-name>-hue 8888:8888 -n <namespace>
 
 Then access Hue at `http://localhost:8888`
 
+## OIDC Authentication Configuration
+
+Hue supports OIDC authentication via Keycloak. The configuration is automatically injected into `hue.ini` via a post-install hook.
+
+### Basic Configuration
+
+```yaml
+hue:
+  oidc:
+    enabled: true
+    keycloak:
+      serviceName: "keycloak"  # Keycloak service name in cluster
+      namespace: ""  # Empty = same namespace as release
+      realm: "master"  # Keycloak realm name
+      ingressDomain: "keycloak.local"  # Optional: if Keycloak is accessible via ingress
+    clientId: "trino-hue"
+    clientSecret: "your-client-secret"
+    createUsersOnLogin: true  # Auto-create users on first login
+    superuserGroup: "hue_superuser"
+    usernameAttribute: "preferred_username"
+```
+
+### Keycloak Client Configuration
+
+In your Keycloak realm, ensure the client (`trino-hue`) is configured with:
+
+- **Client Authentication**: `On` (confidential client)
+- **Valid Redirect URIs**: `https://hue.local/oidc/callback/*` (or your Hue domain)
+- **Web Origins**: `https://hue.local` (or your Hue domain)
+
+The redirect URLs are automatically configured based on `hue.ingress.domain` if not explicitly set.
+
+### Disabling OIDC
+
+To disable OIDC authentication and use default Hue authentication:
+
+```yaml
+hue:
+  oidc:
+    enabled: false
+```
+
 ## Using Trino in Hue
 
 Once both services are running:
 
-1. Access the Hue web interface
-2. Navigate to the Query Editor
-3. Select "Trino" as the interpreter
-4. Start querying your data sources through Trino
+1. Access the Hue web interface (via ingress or port-forward)
+2. If OIDC is enabled, you'll be redirected to Keycloak for authentication
+3. After authentication, navigate to the Query Editor
+4. Select "Trino" as the interpreter
+5. Start querying your data sources through Trino
 
 ## Troubleshooting
+
+### Trino Ingress Returns 406 Error (X-Forwarded-For Header)
+
+If you see a `406 Not Acceptable` error when accessing Trino via ingress with the message "Server configuration does not allow processing of the X-Forwarded-For header", you need to enable forwarded header processing in Trino.
+
+**Solution**: Ensure `http-server.process-forwarded=true` is set in `trino.additionalConfigProperties`:
+
+```yaml
+trino:
+  additionalConfigProperties:
+    - http-server.process-forwarded=true
+```
+
+After updating the configuration, upgrade the Helm release:
+```bash
+helm upgrade trino-hue . -n <namespace>
+```
+
+The Trino coordinator pods will restart with the new configuration.
+
+### OIDC Redirect URI Issue
+
+If the OIDC redirect URI is using an internal URL (e.g., `http://127.0.0.1:8888/oidc/callback/`) instead of your configured domain (e.g., `https://hue.local/oidc/callback/`), the chart automatically configures Hue to use forwarded headers from the ingress.
+
+The patching script adds the following settings to the `[desktop]` section:
+- `use_x_forwarded_host=true` - Tells Hue to use the `X-Forwarded-Host` header
+- `secure_proxy_ssl_header=X-Forwarded-Proto` - Tells Hue to use the `X-Forwarded-Proto` header for HTTPS detection
+
+Ensure your ingress is configured with:
+- `nginx.ingress.kubernetes.io/use-forwarded-headers: "true"` (already configured by default)
+
+After upgrading, restart the Hue deployment to pick up the new configuration.
+
+### OIDC Authentication Error: ModuleNotFoundError
+
+If you see `ModuleNotFoundError: No module named 'mozilla_django_oidc'` when OIDC is enabled, you need to use a custom Hue Docker image with the package pre-installed.
+
+**Solution**: Build a custom Hue image with `mozilla_django_oidc` installed:
+
+1. Create a Dockerfile:
+   ```dockerfile
+   FROM gethue/hue:latest
+   RUN ./build/env/bin/pip install --no-cache-dir mozilla_django_oidc
+   ```
+
+2. Build and load the image into your cluster:
+   ```bash
+   docker build -t hue-with-oidc:latest -f docker/Dockerfile .
+   # For Minikube:
+   minikube image load hue-with-oidc:latest
+   # Or push to a registry accessible by your cluster
+   ```
+
+3. Update `values.yaml` to use your custom image:
+   ```yaml
+   hue:
+     image:
+       registry: ""  # Empty for local images, or your registry
+       tag: "latest"  # Your custom image tag
+       pullPolicy: "Never"  # Use "Never" for local images
+   ```
+
+4. Upgrade the Helm release:
+   ```bash
+   helm upgrade trino-hue . -n <namespace>
+   ```
 
 ### Hue Cannot Connect to Trino
 

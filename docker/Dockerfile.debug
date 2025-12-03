@@ -1,0 +1,3 @@
+FROM gethue/hue:latest
+# Install OIDC support and debugging tools
+RUN ./build/env/bin/pip install --no-cache-dir mozilla_django_oidc debugpy

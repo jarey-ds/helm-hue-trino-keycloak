@@ -19,10 +19,48 @@ data:
 
     hue_ini = config["data"]["hue-ini"]
 
+    # Get Hue ingress domain for redirect whitelist
+    hue_ingress_domain = os.environ.get("HUE_INGRESS_DOMAIN", "hue.local")
+
     # Configure CSRF trusted origins for ingress
     # Use trusted_origins in [[session]] section which is a child of [desktop]
     trusted_origins = os.environ.get("TRUSTED_ORIGINS", "http://hue.local,https://hue.local")
     trusted_origins_config = f"trusted_origins={trusted_origins}"
+    
+    # Configure proxy headers for correct redirect URI generation
+    # These settings ensure Hue uses forwarded headers from ingress/proxy
+    use_x_forwarded_host = "use_x_forwarded_host=true"
+    secure_proxy_ssl_header = "secure_proxy_ssl_header=true"
+    # Enable debug mode for OIDC troubleshooting (can be disabled in production)
+    django_debug_mode = "django_debug_mode=true"
+    
+    # Build redirect whitelist with Hue URLs
+    redirect_whitelist_parts = [f"^/.*$", f"^https://{hue_ingress_domain}/.*$", f"^http://{hue_ingress_domain}/.*$"]
+    
+    # Add Keycloak URLs to redirect whitelist if OIDC is enabled
+    oidc_enabled = os.environ.get("OIDC_ENABLED", "false") == "true"
+    if oidc_enabled:
+        oidc_keycloak_ingress_domain = os.environ.get("OIDC_KEYCLOAK_INGRESS_DOMAIN", "")
+        oidc_keycloak_service = os.environ.get("OIDC_KEYCLOAK_SERVICE", "keycloak")
+        oidc_keycloak_namespace = os.environ.get("OIDC_KEYCLOAK_NAMESPACE", "default")
+        
+        if oidc_keycloak_ingress_domain:
+            # Use ingress domain (typically HTTPS, but include both HTTP and HTTPS for flexibility)
+            redirect_whitelist_parts.append(f"^https://{oidc_keycloak_ingress_domain}/.*$")
+            redirect_whitelist_parts.append(f"^http://{oidc_keycloak_ingress_domain}/.*$")
+        else:
+            # Use service FQDN (internal, typically HTTP)
+            keycloak_service_fqdn = f"{oidc_keycloak_service}.{oidc_keycloak_namespace}.svc.cluster.local"
+            redirect_whitelist_parts.append(f"^https://{keycloak_service_fqdn}/.*$")
+            redirect_whitelist_parts.append(f"^http://{keycloak_service_fqdn}/.*$")
+    
+    # Build final redirect whitelist string
+    redirect_whitelist = f"redirect_whitelist={','.join(redirect_whitelist_parts)}"
+    # Reverse proxy configuration
+    behind_reverse_proxy = os.environ.get("BEHIND_REVERSE_PROXY", "true")
+    reverse_proxy_header = os.environ.get("REVERSE_PROXY_HEADER", "HTTP_X_FORWARDED_FOR")
+    behind_reverse_proxy_config = f"behind_reverse_proxy={behind_reverse_proxy}"
+    reverse_proxy_header_config = f"reverse_proxy_header={reverse_proxy_header}"
     
     # Find [desktop] section and add [[session]] as a child section
     # Pattern: [desktop] ... content ... [[next_section]] or end of file
@@ -33,6 +71,61 @@ data:
         desktop_section = desktop_match.group(0)
         desktop_start = desktop_match.start()
         desktop_end = desktop_match.end()
+        
+        # Add proxy header settings and debug mode to [desktop] section if not present
+        if "use_x_forwarded_host" not in desktop_section:
+            # Insert after [desktop] line but before any subsections
+            desktop_section = re.sub(r"(\[desktop\])", r"\1\n" + use_x_forwarded_host, desktop_section, count=1)
+        if "secure_proxy_ssl_header" not in desktop_section:
+            # Insert after use_x_forwarded_host or after [desktop]
+            if "use_x_forwarded_host" in desktop_section:
+                desktop_section = re.sub(r"(use_x_forwarded_host=true)", r"\1\n" + secure_proxy_ssl_header, desktop_section, count=1)
+            else:
+                desktop_section = re.sub(r"(\[desktop\])", r"\1\n" + secure_proxy_ssl_header, desktop_section, count=1)
+        if "django_debug_mode" not in desktop_section:
+            # Add debug mode for troubleshooting OIDC issues
+            if "secure_proxy_ssl_header" in desktop_section:
+                desktop_section = re.sub(r"(secure_proxy_ssl_header=true)", r"\1\n" + django_debug_mode, desktop_section, count=1)
+            elif "use_x_forwarded_host" in desktop_section:
+                desktop_section = re.sub(r"(use_x_forwarded_host=true)", r"\1\n" + django_debug_mode, desktop_section, count=1)
+            else:
+                desktop_section = re.sub(r"(\[desktop\])", r"\1\n" + django_debug_mode, desktop_section, count=1)
+        if "redirect_whitelist" not in desktop_section:
+            # Add redirect whitelist to allow OIDC callback redirects
+            if "django_debug_mode" in desktop_section:
+                desktop_section = re.sub(r"(django_debug_mode=true)", r"\1\n" + redirect_whitelist, desktop_section, count=1)
+            elif "secure_proxy_ssl_header" in desktop_section:
+                desktop_section = re.sub(r"(secure_proxy_ssl_header=true)", r"\1\n" + redirect_whitelist, desktop_section, count=1)
+            elif "use_x_forwarded_host" in desktop_section:
+                desktop_section = re.sub(r"(use_x_forwarded_host=true)", r"\1\n" + redirect_whitelist, desktop_section, count=1)
+            else:
+                desktop_section = re.sub(r"(\[desktop\])", r"\1\n" + redirect_whitelist, desktop_section, count=1)
+        if "behind_reverse_proxy" not in desktop_section:
+            # Add behind_reverse_proxy setting
+            if "redirect_whitelist" in desktop_section:
+                desktop_section = re.sub(r"(redirect_whitelist=.*)", r"\1\n" + behind_reverse_proxy_config, desktop_section, count=1)
+            elif "django_debug_mode" in desktop_section:
+                desktop_section = re.sub(r"(django_debug_mode=true)", r"\1\n" + behind_reverse_proxy_config, desktop_section, count=1)
+            elif "secure_proxy_ssl_header" in desktop_section:
+                desktop_section = re.sub(r"(secure_proxy_ssl_header=true)", r"\1\n" + behind_reverse_proxy_config, desktop_section, count=1)
+            elif "use_x_forwarded_host" in desktop_section:
+                desktop_section = re.sub(r"(use_x_forwarded_host=true)", r"\1\n" + behind_reverse_proxy_config, desktop_section, count=1)
+            else:
+                desktop_section = re.sub(r"(\[desktop\])", r"\1\n" + behind_reverse_proxy_config, desktop_section, count=1)
+        if "reverse_proxy_header" not in desktop_section:
+            # Add reverse_proxy_header setting
+            if "behind_reverse_proxy" in desktop_section:
+                desktop_section = re.sub(r"(behind_reverse_proxy=.*)", r"\1\n" + reverse_proxy_header_config, desktop_section, count=1)
+            elif "redirect_whitelist" in desktop_section:
+                desktop_section = re.sub(r"(redirect_whitelist=.*)", r"\1\n" + reverse_proxy_header_config, desktop_section, count=1)
+            elif "django_debug_mode" in desktop_section:
+                desktop_section = re.sub(r"(django_debug_mode=true)", r"\1\n" + reverse_proxy_header_config, desktop_section, count=1)
+            elif "secure_proxy_ssl_header" in desktop_section:
+                desktop_section = re.sub(r"(secure_proxy_ssl_header=true)", r"\1\n" + reverse_proxy_header_config, desktop_section, count=1)
+            elif "use_x_forwarded_host" in desktop_section:
+                desktop_section = re.sub(r"(use_x_forwarded_host=true)", r"\1\n" + reverse_proxy_header_config, desktop_section, count=1)
+            else:
+                desktop_section = re.sub(r"(\[desktop\])", r"\1\n" + reverse_proxy_header_config, desktop_section, count=1)
         
         # Check if [[session]] already exists within [desktop] section
         if "[[session]]" in desktop_section:
@@ -63,9 +156,9 @@ data:
         # Replace the [desktop] section in the full config
         hue_ini = hue_ini[:desktop_start] + desktop_section + hue_ini[desktop_end:]
     else:
-        # [desktop] section doesn't exist, add it with [[session]] child
-        hue_ini = "[desktop]\n[[session]]\n" + trusted_origins_config + "\n\n" + hue_ini
-        print("Added [desktop] section with [[session]] child")
+        # [desktop] section doesn't exist, add it with proxy settings, debug mode, redirect whitelist, reverse proxy settings, and [[session]] child
+        hue_ini = f"[desktop]\n{use_x_forwarded_host}\n{secure_proxy_ssl_header}\n{django_debug_mode}\n{redirect_whitelist}\n{behind_reverse_proxy_config}\n{reverse_proxy_header_config}\n[[session]]\n{trusted_origins_config}\n\n" + hue_ini
+        print("Added [desktop] section with proxy settings, debug mode, redirect whitelist, reverse proxy settings, and [[session]] child")
 
     trino_service = os.environ["TRINO_SERVICE"]
     trino_port = os.environ["TRINO_PORT"]
@@ -89,7 +182,112 @@ data:
         print("Adding Trino interpreter...")
         hue_ini = re.sub(r"(\[\[interpreters\]\])", r"\1\n" + trino_interpreter, hue_ini)
 
+    # Configure authentication backends (always applied, regardless of OIDC)
+    # Get auth backends from environment variable (comma-separated)
+    auth_backends_str = os.environ.get("AUTH_BACKENDS", "desktop.auth.backend.AllowFirstUserDjangoBackend,desktop.auth.backend.OIDCBackend")
+    auth_backends_list = [b.strip() for b in auth_backends_str.split(",") if b.strip()]
+    auth_backends_value = ",".join(auth_backends_list)
     
+    # Generate auth backend configuration block
+    auth_backend_config = f"[[auth]]\nbackend={auth_backends_value}\n"
+    
+    # Check if [[auth]] section already exists
+    if "[[auth]]" in hue_ini:
+        # Update existing [[auth]] section
+        auth_pattern = r"(\[\[auth\]\])(.*?)(?=\n\[\[|\n\[|\Z)"
+        hue_ini = re.sub(auth_pattern, auth_backend_config.strip(), hue_ini, flags=re.DOTALL)
+        print("Updated [[auth]] section")
+    else:
+        # Add [[auth]] section after [desktop]
+        desktop_pattern = r"(\[desktop\])(.*?)(?=\n\[[^[]|\Z)"
+        desktop_match = re.search(desktop_pattern, hue_ini, re.DOTALL)
+        if desktop_match:
+            desktop_end = desktop_match.end()
+            hue_ini = hue_ini[:desktop_end] + "\n" + auth_backend_config + hue_ini[desktop_end:]
+            print("Added [[auth]] section")
+        else:
+            # If [desktop] doesn't exist, add it with [[auth]]
+            hue_ini = "[desktop]\n" + auth_backend_config + "\n" + hue_ini
+            print("Added [desktop] section with [[auth]] child")
+    
+    # Configure OIDC authentication if enabled (oidc_enabled already checked above for redirect_whitelist)
+    if oidc_enabled:
+        print("Configuring OIDC authentication...")
+        oidc_keycloak_service = os.environ["OIDC_KEYCLOAK_SERVICE"]
+        oidc_keycloak_namespace = os.environ["OIDC_KEYCLOAK_NAMESPACE"]
+        oidc_keycloak_realm = os.environ["OIDC_KEYCLOAK_REALM"]
+        oidc_keycloak_ingress_domain = os.environ.get("OIDC_KEYCLOAK_INGRESS_DOMAIN", "")
+        oidc_client_id = os.environ["OIDC_CLIENT_ID"]
+        oidc_client_secret = os.environ["OIDC_CLIENT_SECRET"]
+        oidc_create_users = os.environ.get("OIDC_CREATE_USERS", "true")
+        oidc_superuser_group = os.environ.get("OIDC_SUPERUSER_GROUP", "hue_superuser")
+        oidc_username_attribute = os.environ.get("OIDC_USERNAME_ATTRIBUTE", "preferred_username")
+        oidc_login_redirect_url = os.environ.get("OIDC_LOGIN_REDIRECT_URL", "")
+        oidc_login_redirect_url_failure = os.environ.get("OIDC_LOGIN_REDIRECT_URL_FAILURE", "")
+        hue_ingress_domain = os.environ.get("HUE_INGRESS_DOMAIN", "hue.local")
+        allow_http_redirect = os.environ.get("OIDC_ALLOW_HTTP_REDIRECT", "false") == "true"
+        ingress_force_ssl = os.environ.get("INGRESS_FORCE_SSL", "false") == "true"
+        
+        # Determine Keycloak base URL
+        if oidc_keycloak_ingress_domain:
+            keycloak_base_url = f"https://{oidc_keycloak_ingress_domain}"
+        else:
+            # Use service FQDN
+            keycloak_base_url = f"http://{oidc_keycloak_service}.{oidc_keycloak_namespace}.svc.cluster.local"
+        
+        # Auto-configure redirect URLs if not provided
+        # Use HTTPS if ingress forces SSL redirect, otherwise use HTTP only if explicitly allowed
+        # Default to HTTPS for security
+        if ingress_force_ssl:
+            scheme = "https"
+        elif allow_http_redirect:
+            scheme = "http"
+        else:
+            scheme = "https"  # Default to HTTPS
+        
+        if not oidc_login_redirect_url:
+            oidc_login_redirect_url = f"{scheme}://{hue_ingress_domain}/oidc/callback/"
+        if not oidc_login_redirect_url_failure:
+            oidc_login_redirect_url_failure = f"{scheme}://{hue_ingress_domain}/hue/oidc_failed/"
+        
+        oidc_disable_ssl_verification = os.environ.get("OIDC_DISABLE_SSL_VERIFICATION", "false") == "true"
+        
+        oidc_config = ("[[oidc]]\n" +
+            f"create_users_on_login={oidc_create_users}\n" +
+            f"superuser_group={oidc_superuser_group}\n" +
+            f"login_redirect_url={oidc_login_redirect_url}\n" +
+            f"login_redirect_url_failure={oidc_login_redirect_url_failure}\n" +
+            f"oidc_op_authorization_endpoint={keycloak_base_url}/realms/{oidc_keycloak_realm}/protocol/openid-connect/auth\n" +
+            f"oidc_op_token_endpoint={keycloak_base_url}/realms/{oidc_keycloak_realm}/protocol/openid-connect/token\n" +
+            f"oidc_op_user_endpoint={keycloak_base_url}/realms/{oidc_keycloak_realm}/protocol/openid-connect/userinfo\n" +
+            f"oidc_op_jwks_endpoint={keycloak_base_url}/realms/{oidc_keycloak_realm}/protocol/openid-connect/certs\n" +
+            f"oidc_rp_client_id={oidc_client_id}\n" +
+            f"oidc_rp_client_secret={oidc_client_secret}\n" +
+            f"oidc_username_attribute={oidc_username_attribute}\n")
+        
+        # Add SSL verification setting if needed
+        if oidc_disable_ssl_verification:
+            oidc_config += "oidc_verify_ssl=false\n"
+            print("SSL verification disabled for OIDC requests")
+        
+        # Check if [[oidc]] section already exists
+        if "[[oidc]]" in hue_ini:
+            # Update existing [[oidc]] section
+            oidc_pattern = r"(\[\[oidc\]\])(.*?)(?=\n\[\[|\n\[|\Z)"
+            hue_ini = re.sub(oidc_pattern, oidc_config.strip(), hue_ini, flags=re.DOTALL)
+            print("Updated [[oidc]] section")
+        else:
+            # Add [[oidc]] section after [[auth]]
+            auth_pattern = r"(\[\[auth\]\])(.*?)(?=\n\[\[|\n\[|\Z)"
+            auth_match = re.search(auth_pattern, hue_ini, re.DOTALL)
+            if auth_match:
+                auth_end = auth_match.end()
+                hue_ini = hue_ini[:auth_end] + "\n" + oidc_config + hue_ini[auth_end:]
+                print("Added [[oidc]] section")
+            else:
+                # If [[auth]] doesn't exist, add both (shouldn't happen, but handle it)
+                hue_ini = hue_ini + "\n" + auth_backend_config + oidc_config
+                print("Added [[auth]] and [[oidc]] sections")
 
     # Update the config
     config["data"]["hue-ini"] = hue_ini
